@@ -16,12 +16,36 @@ import { zodToJsonSchema } from "zod-to-json-schema"
 // Maximum number of search results to return
 const SEARCH_LIMIT = 200
 
-// Command line argument parsing
-const args = process.argv.slice(2)
-if (args.length === 0) {
-  console.error("Usage: mcp-obsidian <vault-directory>")
-  process.exit(1)
+// Parse command line arguments with flags
+interface ServerConfig {
+  vaultPath: string
+  enableWrite: boolean
 }
+
+function parseArgs(): ServerConfig {
+  const args = process.argv.slice(2)
+  let config: ServerConfig = {
+    vaultPath: '',
+    enableWrite: false
+  }
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--enable-write' || args[i] === '-w') {
+      config.enableWrite = true
+    } else if (!config.vaultPath) {
+      config.vaultPath = args[i]
+    }
+  }
+
+  if (!config.vaultPath) {
+    console.error("Usage: mcp-obsidian <vault-directory> [--enable-write|-w]")
+    process.exit(1)
+  }
+
+  return config
+}
+
+const config = parseArgs()
 
 // Normalize all paths consistently
 function normalizePath(p: string): string {
@@ -36,23 +60,19 @@ function expandHome(filepath: string): string {
 }
 
 // Store allowed directories in normalized form
-const vaultDirectories = [normalizePath(path.resolve(expandHome(args[0])))]
+const vaultDirectories = [normalizePath(path.resolve(expandHome(config.vaultPath)))]
 
-// Validate that all directories exist and are accessible
-await Promise.all(
-  args.map(async (dir) => {
-    try {
-      const stats = await fs.stat(dir)
-      if (!stats.isDirectory()) {
-        console.error(`Error: ${dir} is not a directory`)
-        process.exit(1)
-      }
-    } catch (error) {
-      console.error(`Error accessing directory ${dir}:`, error)
-      process.exit(1)
-    }
-  })
-)
+// Validate that directory exists and is accessible
+try {
+  const stats = await fs.stat(config.vaultPath)
+  if (!stats.isDirectory()) {
+    console.error(`Error: ${config.vaultPath} is not a directory`)
+    process.exit(1)
+  }
+} catch (error) {
+  console.error(`Error accessing directory ${config.vaultPath}:`, error)
+  process.exit(1)
+}
 
 // Security utilities
 async function validatePath(requestedPath: string): Promise<string> {
@@ -115,30 +135,14 @@ async function validatePath(requestedPath: string): Promise<string> {
   }
 }
 
-// Schema definitions
-const ReadNotesArgsSchema = z.object({
-  paths: z.array(z.string()),
-})
-
-const SearchNotesArgsSchema = z.object({
-  query: z.string(),
-})
-
-const ToolInputSchema = ToolSchema.shape.inputSchema
-type ToolInput = z.infer<typeof ToolInputSchema>
-
-// Server setup
-const server = new Server(
-  {
-    name: "mcp-obsidian",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
+// Ensure directory exists
+async function ensureDirectory(dirPath: string): Promise<void> {
+  try {
+    await fs.access(dirPath)
+  } catch {
+    await fs.mkdir(dirPath, { recursive: true })
   }
-)
+}
 
 /**
  * Search for notes in the allowed directories that match the query.
@@ -186,34 +190,98 @@ async function searchNotes(query: string): Promise<string[]> {
   return results
 }
 
+// Schema definitions
+const ReadNotesArgsSchema = z.object({
+  paths: z.array(z.string()),
+})
+
+const SearchNotesArgsSchema = z.object({
+  query: z.string(),
+})
+
+const WriteNoteArgsSchema = z.object({
+  path: z.string(),
+  content: z.string(),
+  createDirectories: z.boolean().optional().default(false),
+})
+
+const UpdateNoteArgsSchema = z.object({
+  path: z.string(),
+  content: z.string(),
+  mode: z.enum(['replace', 'append', 'prepend']).default('replace'),
+})
+
+const ToolInputSchema = ToolSchema.shape.inputSchema
+type ToolInput = z.infer<typeof ToolInputSchema>
+
+// Server setup
+const server = new Server(
+  {
+    name: "mcp-obsidian",
+    version: "1.0.0",
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  }
+)
+
 // Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
+  // Base tools always available
+  const tools = [
+    {
+      name: "read_notes",
+      description:
+        "Read the contents of multiple notes. Each note's content is returned with its " +
+        "path as a reference. Failed reads for individual notes won't stop " +
+        "the entire operation. Reading too many at once may result in an error.",
+      inputSchema: zodToJsonSchema(ReadNotesArgsSchema) as ToolInput,
+    },
+    {
+      name: "search_notes",
+      description:
+        "Searches for a note by its name. The search " +
+        "is case-insensitive and matches partial names. " +
+        "Queries can also be a valid regex. Returns paths of the notes " +
+        "that match the query.",
+      inputSchema: zodToJsonSchema(SearchNotesArgsSchema) as ToolInput,
+    },
+  ]
+
+  // Add write tools only if enabled
+  if (config.enableWrite) {
+    tools.push(
       {
-        name: "read_notes",
+        name: "write_note",
         description:
-          "Read the contents of multiple notes. Each note's content is returned with its " +
-          "path as a reference. Failed reads for individual notes won't stop " +
-          "the entire operation. Reading too many at once may result in an error.",
-        inputSchema: zodToJsonSchema(ReadNotesArgsSchema) as ToolInput,
+          "Creates a new note or completely overwrites an existing note. " +
+          "Can optionally create parent directories if they don't exist. " +
+          "Path must end in .md extension.",
+        inputSchema: zodToJsonSchema(WriteNoteArgsSchema) as ToolInput,
       },
       {
-        name: "search_notes",
+        name: "update_note",
         description:
-          "Searches for a note by its name. The search " +
-          "is case-insensitive and matches partial names. " +
-          "Queries can also be a valid regex. Returns paths of the notes " +
-          "that match the query.",
-        inputSchema: zodToJsonSchema(SearchNotesArgsSchema) as ToolInput,
-      },
-    ],
+          "Updates an existing note. Can replace entire content, append to end, " +
+          "or prepend to beginning. Path must end in .md extension.",
+        inputSchema: zodToJsonSchema(UpdateNoteArgsSchema) as ToolInput,
+      }
+    )
   }
+
+  return { tools }
 })
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     const { name, arguments: args } = request.params
+
+    // Check write permission for write operations
+    if ((name === 'write_note' || name === 'update_note') && !config.enableWrite) {
+      throw new Error('Write operations are disabled. Start the server with --enable-write to enable them.')
+    }
 
     switch (name) {
       case "read_notes": {
@@ -240,6 +308,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ type: "text", text: results.join("\n---\n") }],
         }
       }
+
       case "search_notes": {
         const parsed = SearchNotesArgsSchema.safeParse(args)
         if (!parsed.success) {
@@ -265,6 +334,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         }
       }
+
+      case "write_note": {
+        const parsed = WriteNoteArgsSchema.safeParse(args)
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for write_note: ${parsed.error}`)
+        }
+
+        if (!parsed.data.path.endsWith('.md')) {
+          throw new Error('Note path must end with .md extension')
+        }
+
+        const fullPath = path.join(vaultDirectories[0], parsed.data.path)
+        const validPath = await validatePath(fullPath)
+
+        if (parsed.data.createDirectories) {
+          await ensureDirectory(path.dirname(validPath))
+        }
+
+        await fs.writeFile(validPath, parsed.data.content, 'utf-8')
+        return {
+          content: [{ type: "text", text: `Successfully wrote note to ${parsed.data.path}` }],
+        }
+      }
+
+      case "update_note": {
+        const parsed = UpdateNoteArgsSchema.safeParse(args)
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for update_note: ${parsed.error}`)
+        }
+
+        if (!parsed.data.path.endsWith('.md')) {
+          throw new Error('Note path must end with .md extension')
+        }
+
+        const fullPath = path.join(vaultDirectories[0], parsed.data.path)
+        const validPath = await validatePath(fullPath)
+
+        let finalContent: string
+        if (parsed.data.mode !== 'replace') {
+          const existingContent = await fs.readFile(validPath, 'utf-8')
+          finalContent = parsed.data.mode === 'append'
+            ? `${existingContent}\n${parsed.data.content}`
+            : `${parsed.data.content}\n${existingContent}`
+        } else {
+          finalContent = parsed.data.content
+        }
+
+        await fs.writeFile(validPath, finalContent, 'utf-8')
+        return {
+          content: [{ type: "text", text: `Successfully updated note at ${parsed.data.path}` }],
+        }
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`)
     }
@@ -283,6 +405,7 @@ async function runServer() {
   await server.connect(transport)
   console.error("MCP Obsidian Server running on stdio")
   console.error("Allowed directories:", vaultDirectories)
+  console.error("Write operations:", config.enableWrite ? "enabled" : "disabled")
 }
 
 runServer().catch((error) => {

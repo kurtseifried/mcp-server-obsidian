@@ -1,7 +1,7 @@
 {
 	"name": "mcp-obsidian",
 	"version": "1.0.0",
-	"description": "Model Context Protocol server for Obsidian Vaults",
+	"description": "Model Context Protocol server for Obsidian Vaults - Read by default with optional write support",
 	"author": "Henry Mao (https://calclavia.com)",
 	"main": "main.js",
 	"type": "module",
@@ -14,8 +14,16 @@
 	"scripts": {
 		"build": "tsc && shx chmod +x dist/*.js",
 		"prepare": "npm run build",
-		"watch": "tsc --watch"
+		"watch": "tsc --watch",
+		"test": "echo \"No tests specified\" && exit 0"
 	},
+	"keywords": [
+		"obsidian",
+		"mcp",
+		"claude",
+		"markdown",
+		"notes"
+	],
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "0.5.0",
 		"glob": "^10.3.10",
@@ -25,5 +33,10 @@
 		"@types/node": "^20.11.0",
 		"shx": "^0.3.4",
 		"typescript": "^5.3.3"
-	}
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/calclavia/mcp-server-obsidian.git"
+	},
+	"license": "MIT"
 }
